@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/plugins/enviro_temp" >
+        <file>icon.png</file>
+        <file>globe_icon.png</file>
+    </qresource>
+</RCC>
