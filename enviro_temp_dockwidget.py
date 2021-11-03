@@ -27,9 +27,10 @@ import os
 from qgis.PyQt import QtGui, QtWidgets, uic
 from qgis.PyQt.QtCore import NULL, pyqtSignal, Qt
 from qgis.PyQt.QtWidgets import QMessageBox, QTableWidgetItem
-from qgis.core import QgsProject, QgsFeature, QgsGeometry
+from qgis.core import QgsProject, QgsFeature, QgsGeometry, QgsVectorLayer, QgsDataSourceUri
 from qgis.utils import iface
 from qgis.gui import QgsMapToolEmitPoint, QgsVertexMarker
+from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem, QIcon
 
 from .dialogs.project_detail_dialog import ProjectDetailDialog
 from .dialogs.site_detail_dialog import SiteDetailDialog
@@ -37,6 +38,11 @@ from .dialogs.deployment_detail_dialog import DeploymentDetailDialog
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'enviro_temp_dockwidget_base.ui'))
+
+# These are used to construct QStandardItems
+item_attribute = {'path': Qt.UserRole + 1,
+             'feature_id': Qt.UserRole + 2,
+             'layer': Qt.UserRole + 3}
 
 
 class EnviroTempDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
@@ -53,49 +59,152 @@ class EnviroTempDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
 
+        # the widget
+        self.dockwidget = self
+
         # Constants for the QGIS interface
         self.iface = iface
         self.canvas = self.iface.mapCanvas()
+
+        # the tree view
+        self.treeView = self.treeView
+
+        # tables to be added from the db, and their geom column
+        table_list = [
+            {'table_name':'projects', 'table_geom': ''},
+            {'table_name':'sites', 'table_geom': 'geom'},
+            {'table_name':'deployments', 'table_geom': ''},
+            {'table_name':'measurements', 'table_geom': ''},
+            {'table_name':'site_status', 'table_geom': ''}
+        ]
+
+        # Check for a group, add it if it is not there
+        tree_root = QgsProject.instance().layerTreeRoot()
+        if tree_root.findGroup('Enviro-Temp') is None:
+            temperature_group = tree_root.addGroup('Enviro-Temp')
+
+        # dial this process in....of looking for layers
+        current_layers = []
+        for layer in QgsProject.instance().mapLayers().values():
+            current_layers.append(layer.name())
+        
+        # Create uri connection
+        uri = QgsDataSourceUri()
+        # set host name, port, database name, username and password
+        uri.setConnection("localhost", "5432", "enviro_temp", "postgres", "mykiss28")
+
+        # TODO check if the layer is there and add the layer if not
+        for table in table_list:
+            if table['table_name'] not in current_layers:
+                uri.setDataSource ("public", table['table_name'], table['table_geom'])
+                add_layer = QgsVectorLayer(uri.uri(False), table['table_name'], "postgres")
+                QgsProject.instance().addMapLayer(add_layer, False)
+                temperature_group.addLayer(add_layer)
 
         # query the database
         self.projects = QgsProject.instance().mapLayersByName('projects')[0]
         self.sites = QgsProject.instance().mapLayersByName('sites')[0]
         self.deployments = QgsProject.instance().mapLayersByName('deployments')[0]
 
+        # TODO maybe zoom to sites
+        # # map_canvas.setExtent(sites_layer.extent())
+        # self.iface.setActiveLayer(self.projects)
+        # sites_layer.selectAll()
+        # map_canvas.zoomToSelected()
+        # sites_layer.removeSelection()
+
+        # TODO Symbolize and label the sites layer?
+        # TODO Figure out why the layer symbology in the tree doesn't change when symbolized.
+        # TODO Consider using a qml for layer symbology 
+        # sites_symbol = QgsMarkerSymbol.createSimple({
+        #     'name': 'circle',
+        #     'color': '#0189ff',
+        #     'size': 4
+        #     })
+        # sites_layer.renderer().setSymbol(sites_symbol)
+        # sites_layer.triggerRepaint()
+        # TODO Label the site
+
+        # initialize the standard item model for the tree view
+        self.model = QStandardItemModel()
+        self.treeView.setModel(self.model)
+        # Build the tree
+        self.build_tree()
+
+
+    def build_tree(self, new_item=None):
+        """Builds items in the tree view based on dictionary values that are part of the project"""
+        # TODO resolve this naming - it is stupid and inconsistent throughout
+
+        self.model.clear()
+        root_node = self.model.invisibleRootItem()
+        
+        projects_node = QStandardItem('Temperature Projects')
+        root_node.appendRow(projects_node)
+
+        for project_feature in self.projects.getFeatures():
+            project_node = QStandardItem(project_feature.attribute('project_name'))
+            project_node.setIcon(QIcon(':/plugins/qris_toolbar/qris_design.png'))
+            project_node.setData(project_feature.attribute('project_id'), item_attribute['feature_id'])
+            project_node.setData('project', item_attribute['layer'])
+            projects_node.appendRow(project_node)
+
+            self.sites.setSubsetString("project_id = " + str(project_feature.attribute('project_id')))
+            for site_feature in self.sites.getFeatures():
+                site_node = QStandardItem(site_feature.attribute('site_name'))
+                site_node.setIcon(QIcon(':/plugins/qris_toolbar/qris_design.png'))
+                site_node.setData(site_feature.attribute('site_id'), item_attribute['feature_id'])
+                site_node.setData('site', item_attribute['layer'])
+                project_node.appendRow(site_node)
+            
+                self.deployments.setSubsetString("site_id = " + str(site_feature.attribute('site_id')))
+                for deployment_feature in self.deployments.getFeatures():
+                    # TODO format deployment date and add here
+                    deployment_node = QStandardItem(str(deployment_feature.attribute('deployment_id')))
+                    deployment_node.setIcon(QIcon(':/plugins/qris_toolbar/qris_design.png'))
+                    deployment_node.setData(deployment_feature.attribute('deployment_id'), item_attribute['feature_id'])
+                    deployment_node.setData('deployment', item_attribute['layer'])
+                    site_node.appendRow(deployment_node)
+                
+                self.deployments.setSubsetString("")
+            self.sites.setSubsetString("")
+            
+
+        # TODO may no longer need these?
         # ------ Setup table id ---------
-        self.selected_project_id = None
-        self.selected_site_id = None
-        self.selected_deployment_id = None
+        # self.selected_project_id = None
+        # self.selected_site_id = None
+        # self.selected_deployment_id = None
 
-        # -------- GUI TABLE AND BUTTON SETUP --------
-        # ---- set up PROJECTS
-        self.setup_projects()
-        # add the signal for selecting a project
-        self.comboBox_select_project.currentIndexChanged.connect(self.event_select_project)
-        # TODO: set an initial project id and select it in the combo box
-        self.pushButton_new_project.clicked.connect(self.event_open_new_project)
-        self.pushButton_update_project.clicked.connect(self.event_open_update_project)
+        # # -------- GUI TABLE AND BUTTON SETUP --------
+        # # ---- set up PROJECTS
+        # self.setup_projects()
+        # # add the signal for selecting a project
+        # self.comboBox_select_project.currentIndexChanged.connect(self.event_select_project)
+        # # TODO: set an initial project id and select it in the combo box
+        # self.pushButton_new_project.clicked.connect(self.event_open_new_project)
+        # self.pushButton_update_project.clicked.connect(self.event_open_update_project)
 
-        # ---- set up SITES
-        self.tableWidget_select_site.setColumnWidth(0, 50)
-        # setup the signal for selecting a row
-        self.tableWidget_select_site.cellClicked.connect(self.event_select_site)
-        self.pushButton_new_site.clicked.connect(self.event_new_site_tool)
-        self.pushButton_update_site.clicked.connect(self.event_open_update_site)
+        # # ---- set up SITES
+        # self.tableWidget_select_site.setColumnWidth(0, 50)
+        # # setup the signal for selecting a row
+        # self.tableWidget_select_site.cellClicked.connect(self.event_select_site)
+        # self.pushButton_new_site.clicked.connect(self.event_new_site_tool)
+        # self.pushButton_update_site.clicked.connect(self.event_open_update_site)
 
-        # ---- set up DEPLOYMENTS
-        # # TODO: Change the table columns widths during instantiation of the widget
-        # self.tableWidget_select_deployment.setColumnWidth(0, 50)
-        # setup the signal for selecting a row
-        self.tableWidget_select_deployment.cellClicked.connect(self.event_select_deployment)
-        self.pushButton_new_deployment.clicked.connect(self.event_open_new_deployment)
-        self.pushButton_update_site.clicked.connect(self.event_open_update_deployment)
+        # # ---- set up DEPLOYMENTS
+        # # # TODO: Change the table columns widths during instantiation of the widget
+        # # self.tableWidget_select_deployment.setColumnWidth(0, 50)
+        # # setup the signal for selecting a row
+        # self.tableWidget_select_deployment.cellClicked.connect(self.event_select_deployment)
+        # self.pushButton_new_deployment.clicked.connect(self.event_open_new_deployment)
+        # self.pushButton_update_site.clicked.connect(self.event_open_update_deployment)
 
 
-        # -------- Clear out dialogs --------
-        self.project_detail_dialog = None
-        self.site_detail_dialog = None
-        self.deployment_detail_dialog = None
+        # # -------- Clear out dialogs --------
+        # self.project_detail_dialog = None
+        # self.site_detail_dialog = None
+        # self.deployment_detail_dialog = None
 
 
     def closeEvent(self, event):
@@ -105,275 +214,275 @@ class EnviroTempDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
     # ------------- Setup Widgets ----------------
     # populates tables and combo boxes
     # these should be run after adding, editing, or removing a record in each table
-    def setup_projects(self):
-        """Resets all selection tables and populates the projects combobox"""
-        # reset other tables and indices
-        self.selected_site_id = None
-        self.tableWidget_select_deployment.setRowCount(0)
-        self.selected_deployment_id = None
-        self.tableWidget_select_site.setRowCount(0)
-        # clear the combo box
-        self.comboBox_select_project.clear()
-        for project in self.projects.getFeatures():
-            self.comboBox_select_project.addItem(project['project_name'], project['project_id'])
+    # def setup_projects(self):
+    #     """Resets all selection tables and populates the projects combobox"""
+    #     # reset other tables and indices
+    #     self.selected_site_id = None
+    #     self.tableWidget_select_deployment.setRowCount(0)
+    #     self.selected_deployment_id = None
+    #     self.tableWidget_select_site.setRowCount(0)
+    #     # clear the combo box
+    #     self.comboBox_select_project.clear()
+    #     for project in self.projects.getFeatures():
+    #         self.comboBox_select_project.addItem(project['project_name'], project['project_id'])
 
 
-    def setup_sites(self):
-        """This can be run on select project, or on add a new site. Adds sites to the site table and clears out the deployments table"""
-        # clear the deployment table and id
-        self.tableWidget_select_deployment.setRowCount(0)
-        self.selected_deployment_id = None
-        # clear the site table and id
-        self.tableWidget_select_site.setRowCount(0)
-        self.selected_site_id = None
-        # populate the site table if there is a currently selected project
-        if self.selected_project_id is not None:
-        # TODO: refactor how sites are queried i.e., no loop
-            for site in self.sites.getFeatures():
-                if site.attribute('project_id') == self.selected_project_id:
-                    # get the row count
-                    row = self.tableWidget_select_site.rowCount()
-                    # insert a row at that position
-                    self.tableWidget_select_site.insertRow(row)
-                    # add the data
-                    self.tableWidget_select_site.setItem(row, 0, QTableWidgetItem(str(site.attribute('site_id'))))
-                    self.tableWidget_select_site.setItem(row, 1, QTableWidgetItem(site.attribute('site_name')))
-                    self.tableWidget_select_site.setItem(row, 2, QTableWidgetItem(str(site.attribute('site_status_id'))))
-        # TODO: Something with the map. Maybe zoom to selected sites, or just filter the sites on the map
+    # def setup_sites(self):
+    #     """This can be run on select project, or on add a new site. Adds sites to the site table and clears out the deployments table"""
+    #     # clear the deployment table and id
+    #     self.tableWidget_select_deployment.setRowCount(0)
+    #     self.selected_deployment_id = None
+    #     # clear the site table and id
+    #     self.tableWidget_select_site.setRowCount(0)
+    #     self.selected_site_id = None
+    #     # populate the site table if there is a currently selected project
+    #     if self.selected_project_id is not None:
+    #     # TODO: refactor how sites are queried i.e., no loop
+    #         for site in self.sites.getFeatures():
+    #             if site.attribute('project_id') == self.selected_project_id:
+    #                 # get the row count
+    #                 row = self.tableWidget_select_site.rowCount()
+    #                 # insert a row at that position
+    #                 self.tableWidget_select_site.insertRow(row)
+    #                 # add the data
+    #                 self.tableWidget_select_site.setItem(row, 0, QTableWidgetItem(str(site.attribute('site_id'))))
+    #                 self.tableWidget_select_site.setItem(row, 1, QTableWidgetItem(site.attribute('site_name')))
+    #                 self.tableWidget_select_site.setItem(row, 2, QTableWidgetItem(str(site.attribute('site_status_id'))))
+    #     # TODO: Something with the map. Maybe zoom to selected sites, or just filter the sites on the map
 
-    def setup_deployments(self):
-        """This can be run on select site, or on add a new deployment. Adds deployments to the deployment table."""
-        # clear the deployment table and id
-        self.tableWidget_select_deployment.setRowCount(0)
-        self.selected_deployment_id = None
-        # populate the deployment table if there is a currently selected deployment
-        if self.selected_site_id is not None:
-        # TODO: refactor how deployments are queried i.e., no loop
-            for deployment in self.deployments.getFeatures():
-                if deployment.attribute('site_id') == int(self.selected_site_id):
-                    row = self.tableWidget_select_deployment.rowCount()
-                # insert a row at that position
-                    self.tableWidget_select_deployment.insertRow(row)
-                    # add the data
-                    self.tableWidget_select_deployment.setItem(row, 0, QTableWidgetItem(str(deployment.attribute('deployment_id'))))
-                    self.tableWidget_select_deployment.setItem(row, 1, QTableWidgetItem(deployment.attribute('deployment_date').toString('MMM d, yyyy')))
-                    # TODO: handle missing retrieval dates and times much better
-                    if deployment.attribute('retrieval_date') != NULL:
-                        self.tableWidget_select_deployment.setItem(row, 2, QTableWidgetItem(deployment.attribute('retrieval_date').toString('MMM d, yyyy')))
-                    self.tableWidget_select_deployment.setItem(row, 3, QTableWidgetItem(str(deployment.attribute('retrieval_status_id'))))
-            # TODO: Consider hiding the site_id column?
-            # TODO: Highlight or maybe zoom to the selected site
+    # def setup_deployments(self):
+    #     """This can be run on select site, or on add a new deployment. Adds deployments to the deployment table."""
+    #     # clear the deployment table and id
+    #     self.tableWidget_select_deployment.setRowCount(0)
+    #     self.selected_deployment_id = None
+    #     # populate the deployment table if there is a currently selected deployment
+    #     if self.selected_site_id is not None:
+    #     # TODO: refactor how deployments are queried i.e., no loop
+    #         for deployment in self.deployments.getFeatures():
+    #             if deployment.attribute('site_id') == int(self.selected_site_id):
+    #                 row = self.tableWidget_select_deployment.rowCount()
+    #             # insert a row at that position
+    #                 self.tableWidget_select_deployment.insertRow(row)
+    #                 # add the data
+    #                 self.tableWidget_select_deployment.setItem(row, 0, QTableWidgetItem(str(deployment.attribute('deployment_id'))))
+    #                 self.tableWidget_select_deployment.setItem(row, 1, QTableWidgetItem(deployment.attribute('deployment_date').toString('MMM d, yyyy')))
+    #                 # TODO: handle missing retrieval dates and times much better
+    #                 if deployment.attribute('retrieval_date') != NULL:
+    #                     self.tableWidget_select_deployment.setItem(row, 2, QTableWidgetItem(deployment.attribute('retrieval_date').toString('MMM d, yyyy')))
+    #                 self.tableWidget_select_deployment.setItem(row, 3, QTableWidgetItem(str(deployment.attribute('retrieval_status_id'))))
+    #         # TODO: Consider hiding the site_id column?
+    #         # TODO: Highlight or maybe zoom to the selected site
 
 
-    # ------------- Table Selection Events ----------------
-    def event_select_project(self, project_index):
-        """Should allow selection of a project, query associated sites and populate the sites table"""
-        # clear the tables and selected IDs
-        self.selected_project_id = self.comboBox_select_project.itemData(project_index)
-        self.setup_sites()
+    # # ------------- Table Selection Events ----------------
+    # def event_select_project(self, project_index):
+    #     """Should allow selection of a project, query associated sites and populate the sites table"""
+    #     # clear the tables and selected IDs
+    #     self.selected_project_id = self.comboBox_select_project.itemData(project_index)
+    #     self.setup_sites()
         
 
-    def event_select_site(self, row, col):
-        # get the selected site_id
-        self.selected_site_id = self.tableWidget_select_site.item(row, 0).text()
-        # populate the deployment table
-        self.setup_deployments()
-        # Zoom to selected site
-        self.iface.setActiveLayer(self.sites)
-        self.sites.select(int(self.selected_site_id))
-        self.canvas.zoomToSelected()
-        self.sites.removeSelection()
+    # def event_select_site(self, row, col):
+    #     # get the selected site_id
+    #     self.selected_site_id = self.tableWidget_select_site.item(row, 0).text()
+    #     # populate the deployment table
+    #     self.setup_deployments()
+    #     # Zoom to selected site
+    #     self.iface.setActiveLayer(self.sites)
+    #     self.sites.select(int(self.selected_site_id))
+    #     self.canvas.zoomToSelected()
+    #     self.sites.removeSelection()
 
 
-    def event_select_deployment(self, row, col):
-        """Triggered by selected a deployment, sets the selected_deployment_id"""
-        # get the selected deployment_id
-        self.selected_deployment_id = self.tableWidget_select_deployment.item(row, 0).text()
-        QMessageBox.information(self.tableWidget_select_site, "Test Deployment Selected", "Should be deployment: {}".format(self.selected_deployment_id))
-        # TODO: select associated data and display, maybe throw up a graph.
+    # def event_select_deployment(self, row, col):
+    #     """Triggered by selected a deployment, sets the selected_deployment_id"""
+    #     # get the selected deployment_id
+    #     self.selected_deployment_id = self.tableWidget_select_deployment.item(row, 0).text()
+    #     QMessageBox.information(self.tableWidget_select_site, "Test Deployment Selected", "Should be deployment: {}".format(self.selected_deployment_id))
+    #     # TODO: select associated data and display, maybe throw up a graph.
 
 
-    # ---------- CRUD EVENTS -------------------
-    # ----- New Project Dialog Events
-    def event_open_new_project(self):
-        """Trigger the new project dialog"""
-        if self.project_detail_dialog is None:
-            self.project_detail_dialog = ProjectDetailDialog()
-            self.project_detail_dialog.pushButton_cancel_new_project.clicked.connect(self.event_cancel_project_detail)
-            self.project_detail_dialog.pushButton_save_project.clicked.connect(self.event_save_new_project)
-            self.project_detail_dialog.show()
+    # # ---------- CRUD EVENTS -------------------
+    # # ----- New Project Dialog Events
+    # def event_open_new_project(self):
+    #     """Trigger the new project dialog"""
+    #     if self.project_detail_dialog is None:
+    #         self.project_detail_dialog = ProjectDetailDialog()
+    #         self.project_detail_dialog.pushButton_cancel_new_project.clicked.connect(self.event_cancel_project_detail)
+    #         self.project_detail_dialog.pushButton_save_project.clicked.connect(self.event_save_new_project)
+    #         self.project_detail_dialog.show()
 
 
-    # creates and saves a new project
-    def event_save_new_project(self):
-        """Creates and saves a new project"""
-        # set an index for the new project_id
-        index_project_id = self.projects.fields().indexOf("project_id")
-        new_project_id =  self.projects.maximumValue(index_project_id) + 1
-        # grab the form values
-        new_project_name = self.project_detail_dialog.lineEdit_project_name.text()
-        new_project_description = self.project_detail_dialog.plainTextEdit_project_description.toPlainText()
-        # create a blank QgsFeature that copies the projects table
-        new_project_feature = QgsFeature(self.projects.fields())
-        # set the form values to the feature
-        new_project_feature.setAttribute("project_id", new_project_id)
-        new_project_feature.setAttribute("project_name", new_project_name)
-        new_project_feature.setAttribute("project_description", new_project_description)
-        # set up a data provider and add the feature
-        pr = self.projects.dataProvider()
-        pr.addFeatures([new_project_feature])
-        self.projects.reload
-        # clear and reset the project combo box
-        self.setup_projects()
-        # Set the combo box based on the index of the project name
-        set_to_index = self.comboBox_select_project.findText(new_project_name)
-        self.comboBox_select_project.setCurrentIndex(set_to_index)
-        # close the dialog and clear the dialog object
-        self.project_detail_dialog.close()
-        self.project_detail_dialog = None
+    # # creates and saves a new project
+    # def event_save_new_project(self):
+    #     """Creates and saves a new project"""
+    #     # set an index for the new project_id
+    #     index_project_id = self.projects.fields().indexOf("project_id")
+    #     new_project_id =  self.projects.maximumValue(index_project_id) + 1
+    #     # grab the form values
+    #     new_project_name = self.project_detail_dialog.lineEdit_project_name.text()
+    #     new_project_description = self.project_detail_dialog.plainTextEdit_project_description.toPlainText()
+    #     # create a blank QgsFeature that copies the projects table
+    #     new_project_feature = QgsFeature(self.projects.fields())
+    #     # set the form values to the feature
+    #     new_project_feature.setAttribute("project_id", new_project_id)
+    #     new_project_feature.setAttribute("project_name", new_project_name)
+    #     new_project_feature.setAttribute("project_description", new_project_description)
+    #     # set up a data provider and add the feature
+    #     pr = self.projects.dataProvider()
+    #     pr.addFeatures([new_project_feature])
+    #     self.projects.reload
+    #     # clear and reset the project combo box
+    #     self.setup_projects()
+    #     # Set the combo box based on the index of the project name
+    #     set_to_index = self.comboBox_select_project.findText(new_project_name)
+    #     self.comboBox_select_project.setCurrentIndex(set_to_index)
+    #     # close the dialog and clear the dialog object
+    #     self.project_detail_dialog.close()
+    #     self.project_detail_dialog = None
     
 
-    # ----- Project Dialog CRUD Events ------
-    def event_open_update_project(self):
-        """Trigger and populate the update project dialog"""
-        if self.project_detail_dialog is None:
-            # instantiate a project detail dialog
-            self.project_detail_dialog = ProjectDetailDialog()
-            # get the current project record values
-            update_feature = self.projects.getFeature(int(self.selected_project_id))
-            # populate the edit widgets
-            self.project_detail_dialog.lineEdit_project_name.setText(update_feature['project_name'])
-            self.project_detail_dialog.plainTextEdit_project_description.setPlainText(update_feature['project_description'])
-            # set button functionality
-            self.project_detail_dialog.pushButton_cancel_new_project.clicked.connect(self.event_cancel_project_detail)
-            self.project_detail_dialog.pushButton_save_project.clicked.connect(self.event_save_update_project)
-            self.project_detail_dialog.show()
+    # # ----- Project Dialog CRUD Events ------
+    # def event_open_update_project(self):
+    #     """Trigger and populate the update project dialog"""
+    #     if self.project_detail_dialog is None:
+    #         # instantiate a project detail dialog
+    #         self.project_detail_dialog = ProjectDetailDialog()
+    #         # get the current project record values
+    #         update_feature = self.projects.getFeature(int(self.selected_project_id))
+    #         # populate the edit widgets
+    #         self.project_detail_dialog.lineEdit_project_name.setText(update_feature['project_name'])
+    #         self.project_detail_dialog.plainTextEdit_project_description.setPlainText(update_feature['project_description'])
+    #         # set button functionality
+    #         self.project_detail_dialog.pushButton_cancel_new_project.clicked.connect(self.event_cancel_project_detail)
+    #         self.project_detail_dialog.pushButton_save_project.clicked.connect(self.event_save_update_project)
+    #         self.project_detail_dialog.show()
 
 
-    def event_save_update_project(self):
-        """Saves updates to the database"""
-        # get new attribute values from dialog
-        update_project_name = self.project_detail_dialog.lineEdit_project_name.text()
-        update_project_description = self.project_detail_dialog.plainTextEdit_project_description.toPlainText()
-        # start editing the layer
-        self.projects.startEditing()
-        # update the feature using the project id and field indexes
-        project_name_index = self.projects.fields().indexOf('project_name')
-        self.projects.changeAttributeValue(int(self.selected_project_id), project_name_index, update_project_name)
-        project_description_index = self.projects.fields().indexOf('project_description')
-        self.projects.changeAttributeValue(int(self.selected_project_id), project_description_index, update_project_description)
-        # stop editing and save
-        self.projects.commitChanges()
-        # clear and reset the project combo box
-        self.setup_projects()
-        # Set the combo box based on the index of the project name
-        set_to_index = self.comboBox_select_project.findText(update_project_name)
-        self.comboBox_select_project.setCurrentIndex(set_to_index)
-        # close the dialog and clear the dialog object
-        self.project_detail_dialog.close()
-        self.project_detail_dialog = None
+    # def event_save_update_project(self):
+    #     """Saves updates to the database"""
+    #     # get new attribute values from dialog
+    #     update_project_name = self.project_detail_dialog.lineEdit_project_name.text()
+    #     update_project_description = self.project_detail_dialog.plainTextEdit_project_description.toPlainText()
+    #     # start editing the layer
+    #     self.projects.startEditing()
+    #     # update the feature using the project id and field indexes
+    #     project_name_index = self.projects.fields().indexOf('project_name')
+    #     self.projects.changeAttributeValue(int(self.selected_project_id), project_name_index, update_project_name)
+    #     project_description_index = self.projects.fields().indexOf('project_description')
+    #     self.projects.changeAttributeValue(int(self.selected_project_id), project_description_index, update_project_description)
+    #     # stop editing and save
+    #     self.projects.commitChanges()
+    #     # clear and reset the project combo box
+    #     self.setup_projects()
+    #     # Set the combo box based on the index of the project name
+    #     set_to_index = self.comboBox_select_project.findText(update_project_name)
+    #     self.comboBox_select_project.setCurrentIndex(set_to_index)
+    #     # close the dialog and clear the dialog object
+    #     self.project_detail_dialog.close()
+    #     self.project_detail_dialog = None
 
 
-    def event_delete_project(self):
-        """Deletes the currently selected project"""
-        pass
+    # def event_delete_project(self):
+    #     """Deletes the currently selected project"""
+    #     pass
 
 
-    def event_cancel_project_detail(self):
-        """Closes the project detail dialog"""
-        # TODO: Ask if they are sure
-        QMessageBox.information(None, "Test Stuff", "You Pushed Cancel Bitch")
-        self.project_detail_dialog.close()
-        self.project_detail_dialog = None
+    # def event_cancel_project_detail(self):
+    #     """Closes the project detail dialog"""
+    #     # TODO: Ask if they are sure
+    #     QMessageBox.information(None, "Test Stuff", "You Pushed Cancel Bitch")
+    #     self.project_detail_dialog.close()
+    #     self.project_detail_dialog = None
 
 
-    # ----- Site Dialog CRUD Events ------
-    def event_new_site_tool(self):
-        """Triggers a map tool followed by a new site detail dialog"""
-        # check if a site is selected
-        if self.selected_project_id is None:
-            QMessageBox.information(None, "Select a Project", "Please select a project to add a new site")
-        elif self.site_detail_dialog is None:
-            #  Setup the map tool
-            self.emit_point = QgsMapToolEmitPoint(self.canvas)
-            self.vertex_marker = QgsVertexMarker(self.canvas)
-            # Format the point that it makes
-            self.vertex_marker.setColor(Qt.red)
-            self.vertex_marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
-            self.vertex_marker.setIconSize(10)
-            # add a signal to the map tool
-            self.emit_point.canvasClicked.connect(self.event_open_new_site)
-            # set the map tool
-            self.canvas.setMapTool(self.emit_point)
-        else:
-            return
+    # # ----- Site Dialog CRUD Events ------
+    # def event_new_site_tool(self):
+    #     """Triggers a map tool followed by a new site detail dialog"""
+    #     # check if a site is selected
+    #     if self.selected_project_id is None:
+    #         QMessageBox.information(None, "Select a Project", "Please select a project to add a new site")
+    #     elif self.site_detail_dialog is None:
+    #         #  Setup the map tool
+    #         self.emit_point = QgsMapToolEmitPoint(self.canvas)
+    #         self.vertex_marker = QgsVertexMarker(self.canvas)
+    #         # Format the point that it makes
+    #         self.vertex_marker.setColor(Qt.red)
+    #         self.vertex_marker.setIconType(QgsVertexMarker.ICON_CIRCLE)
+    #         self.vertex_marker.setIconSize(10)
+    #         # add a signal to the map tool
+    #         self.emit_point.canvasClicked.connect(self.event_open_new_site)
+    #         # set the map tool
+    #         self.canvas.setMapTool(self.emit_point)
+    #     else:
+    #         return
             
     
-    def event_open_new_site(self, point, button):
-        # add mouse click handlers
-        if button == Qt.LeftButton:
-            self.vertex_marker.setCenter(point)
-            self.vertex_marker.show()
-        elif button == Qt.RightButton:
-            # set the point for use as geometry when creating a new site
-            self.new_site_geom = QgsGeometry.fromPointXY(point)
-            QMessageBox.information(None, "Site Geometry", point.asWkt())
-            # Do some cleanup on the canvas and tool objects
-            self.emit_point.disconnect()
-            self.canvas.scene().removeItem(self.vertex_marker)
-            self.emit_point = None
-            self.vertex_marker = None
-            self.canvas.refresh()
-            # switch back to the pan tool
-            self.iface.actionPan().trigger()
-            # create an instance of the new site dialog
-            self.site_detail_dialog = SiteDetailDialog()
-            # set buttons
-            self.site_detail_dialog.pushButton_cancel_new_site.clicked.connect(self.event_cancel_site_detail)
-            self.site_detail_dialog.pushButton_save_site.clicked.connect(self.event_save_new_site)
-            # show the dialog
-            self.site_detail_dialog.show()
+    # def event_open_new_site(self, point, button):
+    #     # add mouse click handlers
+    #     if button == Qt.LeftButton:
+    #         self.vertex_marker.setCenter(point)
+    #         self.vertex_marker.show()
+    #     elif button == Qt.RightButton:
+    #         # set the point for use as geometry when creating a new site
+    #         self.new_site_geom = QgsGeometry.fromPointXY(point)
+    #         QMessageBox.information(None, "Site Geometry", point.asWkt())
+    #         # Do some cleanup on the canvas and tool objects
+    #         self.emit_point.disconnect()
+    #         self.canvas.scene().removeItem(self.vertex_marker)
+    #         self.emit_point = None
+    #         self.vertex_marker = None
+    #         self.canvas.refresh()
+    #         # switch back to the pan tool
+    #         self.iface.actionPan().trigger()
+    #         # create an instance of the new site dialog
+    #         self.site_detail_dialog = SiteDetailDialog()
+    #         # set buttons
+    #         self.site_detail_dialog.pushButton_cancel_new_site.clicked.connect(self.event_cancel_site_detail)
+    #         self.site_detail_dialog.pushButton_save_site.clicked.connect(self.event_save_new_site)
+    #         # show the dialog
+    #         self.site_detail_dialog.show()
 
 
-    def event_save_new_site(self, site_id):
-        """Creates and saves a new site"""
-        # set an index for the new site_id
-        index_site_id = self.sites.fields().indexOf("site_id")
-        new_site_id =  self.sites.maximumValue(index_site_id) + 1
-        # grab the form values
-        new_site_name = self.site_detail_dialog.lineEdit_site_name.text()
-        new_site_description = self.site_detail_dialog.plainTextEdit_site_description.toPlainText()
-        new_site_stream_name = self.site_detail_dialog.lineEdit_stream_name.text()
-        new_site_status = self.site_detail_dialog.comboBox_site_status.itemData(site_id)
-        # create a blank QgsFeature that copies the sites table
-        new_site_feature = QgsFeature(self.sites.fields())
-        # set the form values to the feature
-        new_site_feature.setAttribute("site_id", new_site_id)
-        new_site_feature.setAttribute("project_id", self.selected_project_id)
-        new_site_feature.setAttribute("site_name", new_site_name)
-        new_site_feature.setAttribute("site_description", new_site_description)
-        new_site_feature.setAttribute("stream_name", new_site_stream_name)
-        new_site_feature.setAttribute("site_status_id", new_site_status)
-        new_site_feature.setGeometry(self.new_site_geom)
-        # TODO add ability to manually enter lat long?
-        self.sites.startEditing()
-        self.sites.addFeature(new_site_feature)
-        self.sites.commitChanges()
-        # clear and reset the site combo box
-        self.setup_sites()
-        # TODO: Set the combo box based on the index of the site name
-        # set_to_index = self.comboBox_select_site.findText(new_site_name)
-        # self.comboBox_select_site.setCurrentIndex(set_to_index)
-        # close the dialog and clear the dialog object
-        self.new_site_geom = None
-        self.site_detail_dialog.close()
-        self.site_detail_dialog = None
+    # def event_save_new_site(self, site_id):
+    #     """Creates and saves a new site"""
+    #     # set an index for the new site_id
+    #     index_site_id = self.sites.fields().indexOf("site_id")
+    #     new_site_id =  self.sites.maximumValue(index_site_id) + 1
+    #     # grab the form values
+    #     new_site_name = self.site_detail_dialog.lineEdit_site_name.text()
+    #     new_site_description = self.site_detail_dialog.plainTextEdit_site_description.toPlainText()
+    #     new_site_stream_name = self.site_detail_dialog.lineEdit_stream_name.text()
+    #     new_site_status = self.site_detail_dialog.comboBox_site_status.itemData(site_id)
+    #     # create a blank QgsFeature that copies the sites table
+    #     new_site_feature = QgsFeature(self.sites.fields())
+    #     # set the form values to the feature
+    #     new_site_feature.setAttribute("site_id", new_site_id)
+    #     new_site_feature.setAttribute("project_id", self.selected_project_id)
+    #     new_site_feature.setAttribute("site_name", new_site_name)
+    #     new_site_feature.setAttribute("site_description", new_site_description)
+    #     new_site_feature.setAttribute("stream_name", new_site_stream_name)
+    #     new_site_feature.setAttribute("site_status_id", new_site_status)
+    #     new_site_feature.setGeometry(self.new_site_geom)
+    #     # TODO add ability to manually enter lat long?
+    #     self.sites.startEditing()
+    #     self.sites.addFeature(new_site_feature)
+    #     self.sites.commitChanges()
+    #     # clear and reset the site combo box
+    #     self.setup_sites()
+    #     # TODO: Set the combo box based on the index of the site name
+    #     # set_to_index = self.comboBox_select_site.findText(new_site_name)
+    #     # self.comboBox_select_site.setCurrentIndex(set_to_index)
+    #     # close the dialog and clear the dialog object
+    #     self.new_site_geom = None
+    #     self.site_detail_dialog.close()
+    #     self.site_detail_dialog = None
 
 
-    def event_open_update_site(self):
-        """Triggers opens and populates the site detail dialog"""
-        QMessageBox.information(self, "Test Stuff", "You Pushed new site {}".format(self.selected_site_id))
-    pass
+    # def event_open_update_site(self):
+    #     """Triggers opens and populates the site detail dialog"""
+    #     QMessageBox.information(self, "Test Stuff", "You Pushed new site {}".format(self.selected_site_id))
+    # pass
 
 
     def event_save_update_site(self):
@@ -384,80 +493,80 @@ class EnviroTempDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         pass
 
 
-    def event_cancel_site_detail(self):
-        """Closes the site detail dialog"""
-        # TODO: Ask if they are sure
-        QMessageBox.information(self, "Test Stuff", "You Pushed Cancel Bitch")
-        self.new_site_geom = None
-        self.site_detail_dialog.close()
-        self.site_detail_dialog = None
+#     def event_cancel_site_detail(self):
+#         """Closes the site detail dialog"""
+#         # TODO: Ask if they are sure
+#         QMessageBox.information(self, "Test Stuff", "You Pushed Cancel Bitch")
+#         self.new_site_geom = None
+#         self.site_detail_dialog.close()
+#         self.site_detail_dialog = None
 
 
-# ----- Deployment Dialog CRUD Events ------
-    def event_open_new_deployment(self):
-        """opens a dialog for adding a new deployment to an existing site"""
-        if self.deployment_detail_dialog is None and self.selected_site_id is not None:
-            self.deployment_detail_dialog = DeploymentDetailDialog()
-            self.deployment_detail_dialog.pushButton_cancel_new_deployment.clicked.connect(self.event_cancel_deployment_detail)
-            self.deployment_detail_dialog.pushButton_save_deployment.clicked.connect(self.event_save_new_deployment)
-            self.deployment_detail_dialog.show()
-    pass
+# # ----- Deployment Dialog CRUD Events ------
+#     def event_open_new_deployment(self):
+#         """opens a dialog for adding a new deployment to an existing site"""
+#         if self.deployment_detail_dialog is None and self.selected_site_id is not None:
+#             self.deployment_detail_dialog = DeploymentDetailDialog()
+#             self.deployment_detail_dialog.pushButton_cancel_new_deployment.clicked.connect(self.event_cancel_deployment_detail)
+#             self.deployment_detail_dialog.pushButton_save_deployment.clicked.connect(self.event_save_new_deployment)
+#             self.deployment_detail_dialog.show()
+#     pass
 
 
-    def event_save_new_deployment(self):
-        """Creates and saves a new deployment"""
-        # set an index for the new deployment_id
-        index_deployment_id = self.deployments.fields().indexOf("deployment_id")
-        new_deployment_id =  self.deployments.maximumValue(index_deployment_id) + 1
-        # grab the form values
-        # TODO potentially add a logger table and choose from a list of active loggers
-        new_logger_serial = self.deployment_detail_dialog.spinBox_logger_serial.value()
-        new_deployment_date = self.deployment_detail_dialog.dateEdit_deployment_date.date()
-        new_deployment_time = self.deployment_detail_dialog.timeEdit_deployment_time.time()
-        new_deployment_description = self.deployment_detail_dialog.plainTextEdit_deployment_description.toPlainText()
-        # create a blank QgsFeature that copies the deployemnt table
-        new_deployment_feature = QgsFeature(self.deployments.fields())
-        # set the form values to the feature
-        new_deployment_feature.setAttribute("deployment_id", new_deployment_id)
-        new_deployment_feature.setAttribute("site_id", self.selected_site_id)
-        # new_deployment_feature.setAttribute("logger_serial", str(new_logger_serial))
-        new_deployment_feature.setAttribute("deployment_date", new_deployment_date)
-        new_deployment_feature.setAttribute("deployment_time", new_deployment_time)
-        new_deployment_feature.setAttribute("deployment_description", new_deployment_description)
-        # TODO add ability to manually enter lat long?
-        self.deployments.startEditing()
-        self.deployments.addFeature(new_deployment_feature)
-        self.deployments.commitChanges()
-        # setup the deployments table
-        self.setup_deployments()
-        # TODO: Set the combo box based on the index of the site name
-        # set_to_index = self.comboBox_select_site.findText(new_site_name)
-        # self.comboBox_select_site.setCurrentIndex(set_to_index)
-        # close the dialog and clear the dialog object
-        self.deployment_detail_dialog.close()
-        self.deployment_detail_dialog = None
+#     def event_save_new_deployment(self):
+#         """Creates and saves a new deployment"""
+#         # set an index for the new deployment_id
+#         index_deployment_id = self.deployments.fields().indexOf("deployment_id")
+#         new_deployment_id =  self.deployments.maximumValue(index_deployment_id) + 1
+#         # grab the form values
+#         # TODO potentially add a logger table and choose from a list of active loggers
+#         new_logger_serial = self.deployment_detail_dialog.spinBox_logger_serial.value()
+#         new_deployment_date = self.deployment_detail_dialog.dateEdit_deployment_date.date()
+#         new_deployment_time = self.deployment_detail_dialog.timeEdit_deployment_time.time()
+#         new_deployment_description = self.deployment_detail_dialog.plainTextEdit_deployment_description.toPlainText()
+#         # create a blank QgsFeature that copies the deployemnt table
+#         new_deployment_feature = QgsFeature(self.deployments.fields())
+#         # set the form values to the feature
+#         new_deployment_feature.setAttribute("deployment_id", new_deployment_id)
+#         new_deployment_feature.setAttribute("site_id", self.selected_site_id)
+#         # new_deployment_feature.setAttribute("logger_serial", str(new_logger_serial))
+#         new_deployment_feature.setAttribute("deployment_date", new_deployment_date)
+#         new_deployment_feature.setAttribute("deployment_time", new_deployment_time)
+#         new_deployment_feature.setAttribute("deployment_description", new_deployment_description)
+#         # TODO add ability to manually enter lat long?
+#         self.deployments.startEditing()
+#         self.deployments.addFeature(new_deployment_feature)
+#         self.deployments.commitChanges()
+#         # setup the deployments table
+#         self.setup_deployments()
+#         # TODO: Set the combo box based on the index of the site name
+#         # set_to_index = self.comboBox_select_site.findText(new_site_name)
+#         # self.comboBox_select_site.setCurrentIndex(set_to_index)
+#         # close the dialog and clear the dialog object
+#         self.deployment_detail_dialog.close()
+#         self.deployment_detail_dialog = None
 
 
 
-    def event_open_update_deployment(self):
-        """Triggers opens and populates the site detail dialog"""
-        QMessageBox.information(self, "Test Stuff", "You Pushed new site {}".format(self.selected_site_id))
-    pass
+    # def event_open_update_deployment(self):
+    #     """Triggers opens and populates the site detail dialog"""
+    #     QMessageBox.information(self, "Test Stuff", "You Pushed new site {}".format(self.selected_site_id))
+    # pass
 
 
-    def event_save_update_deployment(self):
-        pass
+    # def event_save_update_deployment(self):
+    #     pass
 
 
-    def event_delete_deployment(self):
-        pass
+    # def event_delete_deployment(self):
+    #     pass
 
-    def event_cancel_deployment_detail(self):
-        """Closes the deployment detail dialog"""
-        # TODO: Ask if they are sure
-        QMessageBox.information(self, "Test Stuff", "You Pushed Cancel Bitch")
-        # self.project_detail_dialog.close()
-        # self.project_detail_dialog = None
+    # def event_cancel_deployment_detail(self):
+    #     """Closes the deployment detail dialog"""
+    #     # TODO: Ask if they are sure
+    #     QMessageBox.information(self, "Test Stuff", "You Pushed Cancel Bitch")
+    #     # self.project_detail_dialog.close()
+    #     # self.project_detail_dialog = None
 
 
 
