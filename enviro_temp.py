@@ -230,36 +230,7 @@ class EnviroTemp:
             
             # TODO: Check for the database connect before much of anything else....
 
-            # tables to be added from the db, and their geom column
-            tables = [
-                {'table_name':'projects', 'table_geom': ''},
-                {'table_name':'sites', 'table_geom': 'geom'},
-                {'table_name':'deployments', 'table_geom': ''},
-                {'table_name':'measurements', 'table_geom': ''},
-                {'table_name':'site_status', 'table_geom': ''}
-            ]
-
-            # Check for a group, add it if it is not there
-            tree_root = QgsProject.instance().layerTreeRoot()
-            if tree_root.findGroup('Enviro-Temp') is None:
-                temperature_group = tree_root.addGroup('Enviro-Temp')
-
-            current_layers = []
-            for layer in QgsProject.instance().mapLayers().values():
-                current_layers.append(layer.name())
             
-            # Create uri connection
-            uri = QgsDataSourceUri()
-            # set host name, port, database name, username and password
-            uri.setConnection("localhost", "5432", "enviro_temp", "postgres", "mykiss28")
-
-            # check if the layer is there and add the layer if not
-            for table in tables:
-                if table['table_name'] not in current_layers:
-                    uri.setDataSource ("public", table['table_name'], table['table_geom'])
-                    add_layer = QgsVectorLayer(uri.uri(False), table['table_name'], "postgres")
-                    QgsProject.instance().addMapLayer(add_layer, False)
-                    temperature_group.addLayer(add_layer)
 
             # dockwidget may not exist if:
             #    first run of plugin
@@ -273,32 +244,6 @@ class EnviroTemp:
             self.dockwidget.closingPlugin.connect(self.onClosePlugin)
 
             # show the dockwidget
-            # TODO: fix to allow choice of dock location
-            self.iface.addDockWidget(Qt.BottomDockWidgetArea, self.dockwidget)
+            # TODO fix to allow choice of dock location
+            self.iface.addDockWidget(Qt.LeftDockWidgetArea, self.dockwidget)
             self.dockwidget.show()
-
-            # RUNS WHEN: After the dock widget is shown.
-            # So, if all goes well...
-
-            # Set some constants
-            map_canvas = iface.mapCanvas()
-
-            # TODO: Fix the zoom to the sites layer
-            sites_layer = QgsProject.instance().mapLayersByName('sites')[0]
-            # map_canvas.setExtent(sites_layer.extent())
-            iface.setActiveLayer(sites_layer)
-            sites_layer.selectAll()
-            map_canvas.zoomToSelected()
-            sites_layer.removeSelection()
-
-            # TODO: Symbolize and label the sites layer?
-                # TODO: Figure out why the layer symbology in the tree doesn't change when symbolized.
-            sites_symbol = QgsMarkerSymbol.createSimple({
-                'name': 'circle',
-                'color': '#0189ff',
-                'size': 4
-                })
-            sites_layer.renderer().setSymbol(sites_symbol)
-            sites_layer.triggerRepaint()
-
-            # TODO: Label the sites
